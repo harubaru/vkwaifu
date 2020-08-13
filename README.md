@@ -2,7 +2,7 @@
 
 ![alt text](https://i.imgur.com/NtYtvkU.png)
 
-<sub>Art by [XANAX025](https://twitter.com/XANAX025)</sub>
+<sub>Original artwork created by [XANAX025](https://twitter.com/XANAX025)</sub>
 
 ## Overview
 Displays your waifu with the power of Vulkan and post-processing effects!
@@ -24,8 +24,7 @@ meson compile -C build
 ├── dep: dependencies
 │   ├── inc: include dependencies
 │   └── lib: library dependencies
-├── src: Project Source Code
-└── inc: Project Headers
+└── src: Project Source Code
 ```
 
 ### License
