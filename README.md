@@ -10,7 +10,7 @@ Displays your waifu with the power of Vulkan and post-processing effects!
 ### Dependencies
 - [volk](https://github.com/zeux/volk) Vulkan Loader
 - [glfw](https://github.com/glfw/glfw) Window Handling
-- [meson](https://mesonbuild.com/)
+- [meson](https://mesonbuild.com/) Project Generator
 
 ### Compilation
 After cloning ``vkwaifu``, run this inside the ``vkwaifu`` directory:
