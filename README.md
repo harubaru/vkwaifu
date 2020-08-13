@@ -2,7 +2,7 @@
 
 ![alt text](https://i.imgur.com/NtYtvkU.png)
 
-Art by [XANAX025](https://twitter.com/XANAX025)
+<sub>Art by [XANAX025](https://twitter.com/XANAX025)</sub>
 
 ## Overview
 Displays your waifu with the power of Vulkan and post-processing effects!
