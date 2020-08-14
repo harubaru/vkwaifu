@@ -9,7 +9,7 @@ add_global_link_arguments('-static', language: ['cpp', 'c'])
 if target_machine.system() == 'windows'
 	lib_glfw = compiler.find_library('glfw3', dirs : lib_dir)
 else
-	lib_glfw = compiler.find_library('glfw3')
+	lib_glfw = compiler.find_library('glfw')
 endif
 
 subdir('src')
