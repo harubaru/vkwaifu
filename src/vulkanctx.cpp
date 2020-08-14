@@ -4,6 +4,7 @@
 
 #include "vert.h"
 #include "frag.h"
+#include <cstring>
 
 #ifndef _DEBUG
 //#define _DEBUG
@@ -663,7 +664,7 @@ void VulkanCTX::Present() // presents to screen
 	presentInfo.pImageIndices = (const uint32_t *)&imageIndex;
 
 	res = vkQueuePresentKHR(graphicsQueues[0], &presentInfo);
-	if (res == VK_ERROR_OUT_OF_DATE_KHR) {		
+    if ((res == VK_ERROR_OUT_OF_DATE_KHR) || (res == VK_SUBOPTIMAL_KHR)) {
 		vkDeviceWaitIdle(device);
 		this->Resize();
 		return;
