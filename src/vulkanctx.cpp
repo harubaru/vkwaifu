@@ -354,6 +354,77 @@ bool VulkanCTX::Setup(int width, int height)
 	VK_ASSERT(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDev, queueCreateInfos[0].queueFamilyIndex, surface, &supported), "surface got lost on its way to vkwaifu")
 	VK_FATAL(supported != VK_TRUE, "Device does not support presentation")
 
+	// Create Uniform Buffer Object
+	VkDeviceSize uboSize = sizeof(VulkanUBO);
+	createBuffer(device, physicalDev, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniformBuffer, &uniformBufferMemory, nullptr, 0);
+
+	// Create Descriptor Set Layout first
+	VkDescriptorSetLayoutBinding layoutBindings[2] = {{}, {}};
+
+	layoutBindings[0].binding = 0;
+	layoutBindings[0].descriptorCount = 1;
+	layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	layoutBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	layoutBindings[1].binding = 1;
+	layoutBindings[1].descriptorCount = 1;
+	layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	layoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.bindingCount = 2;
+	layoutInfo.pBindings = layoutBindings;
+
+	VK_ASSERT(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorLayout), "Failed to create Descriptor Layout!")
+
+	// Create Pipeline Layout
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1;
+	pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
+
+	VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout), "Failed to create Pipeline Layout")
+
+	// Setup descriptor pool and descriptor set
+	VkDescriptorPoolSize poolSizes[2]; // 1 descriptor per binding. 0 = ubo, 1 = sampler
+
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	poolSizes[0].descriptorCount = 1;
+
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[1].descriptorCount = 1;
+
+	VkDescriptorPoolCreateInfo poolInfo = {};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.poolSizeCount = 2;
+	poolInfo.pPoolSizes = poolSizes;
+	poolInfo.maxSets = 1; // 1 set only
+
+	VK_ASSERT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool), "Failed to create Descriptor Pool!")
+
+	// create descriptor sets
+	VkDescriptorSetAllocateInfo setAllocInfo = {};
+	setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	setAllocInfo.descriptorPool = descriptorPool;
+	setAllocInfo.descriptorSetCount = 1;
+	setAllocInfo.pSetLayouts = &descriptorLayout;
+
+	VK_ASSERT(vkAllocateDescriptorSets(device, &setAllocInfo, &descriptorSet), "Failed to allocate Descriptor Set!")
+
+	return true;
+}
+
+bool VulkanCTX::Resize() // resizes swapchain
+{
+	int width, height;
+	glfwGetFramebufferSize(window, &width, &height);
+
+	while (!width || !height) {
+		glfwGetFramebufferSize(window, &width, &height);
+		glfwWaitEvents();
+	}
+
 	// Get format and present mode beforehand
 	uint32_t formatCount = 0;
 	std::vector<VkSurfaceFormatKHR> surfaceFormats;
@@ -389,59 +460,7 @@ bool VulkanCTX::Setup(int width, int height)
 
 	VK_FATAL(presentMode == 0xFF, "cannot find supported surface present mode")
 
-	// Create renderpass!
-
-	VkAttachmentDescription colorAttachment = {};
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	colorAttachment.format = surfaceFormat.format;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-	VkAttachmentReference colorAttachmentReference = {};
-	colorAttachmentReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-	VkSubpassDescription subpassDescription = {};
-	subpassDescription.colorAttachmentCount = 1;
-	subpassDescription.pColorAttachments = &colorAttachmentReference;
-	subpassDescription.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-
-	VkSubpassDependency subpassDependency = {};
-	subpassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-	subpassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	subpassDependency.dstSubpass = 0;
-	subpassDependency.srcAccessMask = 0;
-	subpassDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	subpassDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-
-	VkRenderPassCreateInfo renderPassCreateInfo = {};
-	renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	renderPassCreateInfo.attachmentCount = 1;
-	renderPassCreateInfo.pAttachments = &colorAttachment;
-	renderPassCreateInfo.subpassCount = 1;
-	renderPassCreateInfo.pSubpasses = &subpassDescription;
-	renderPassCreateInfo.dependencyCount = 1;
-	renderPassCreateInfo.pDependencies = &subpassDependency;
-
-	VK_ASSERT(vkCreateRenderPass(device, &renderPassCreateInfo, nullptr, &renderPass), "Failed to create Render Pass!")
-
-	return true;
-}
-
-bool VulkanCTX::Resize() // resizes swapchain
-{
-	int width, height;
-	glfwGetFramebufferSize(window, &width, &height);
-
-	while (!width || !height) {
-		glfwGetFramebufferSize(window, &width, &height);
-		glfwWaitEvents();
-	}
-
+	// Create swapchain
 	VkSurfaceCapabilitiesKHR surfaceCapabilities;
 	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDev, surface, &surfaceCapabilities);
 
@@ -472,18 +491,13 @@ bool VulkanCTX::Resize() // resizes swapchain
 
 	// Destroy old objects such as materials
 	if (swapchainCreateInfo.oldSwapchain != VK_NULL_HANDLE) {
-		vkDeviceWaitIdle(device);
-
 		vkDestroySwapchainKHR(device, swapchainCreateInfo.oldSwapchain, nullptr);
 		vkFreeCommandBuffers(device, graphicsPool, static_cast<uint32_t>(presentCommandBuffer.size()), presentCommandBuffer.data());
 
-		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+		vkDestroyRenderPass(device, renderPass, nullptr);
 		vkDestroyPipeline(device, pipeline, nullptr);
 
 		// Don't free textures or uniforms
-
-		vkDestroyDescriptorSetLayout(device, descriptorLayout, nullptr);
-		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 
 		for (uint32_t i = 0; i < swapchainImageCount; i++) {
 			vkDestroyFramebuffer(device, framebuffers[i], nullptr);
@@ -544,6 +558,46 @@ bool VulkanCTX::Resize() // resizes swapchain
 
 	VK_ASSERT(vkAllocateCommandBuffers(device, &commandbufferAllocateInfo, presentCommandBuffer.data()), "Failed to allocate Command Buffers for Presentation")
 
+	// Create renderpass!
+
+	VkAttachmentDescription colorAttachment = {};
+	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	colorAttachment.format = surfaceFormat.format;
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+	VkAttachmentReference colorAttachmentReference = {};
+	colorAttachmentReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription subpassDescription = {};
+	subpassDescription.colorAttachmentCount = 1;
+	subpassDescription.pColorAttachments = &colorAttachmentReference;
+	subpassDescription.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+	VkSubpassDependency subpassDependency = {};
+	subpassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	subpassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	subpassDependency.dstSubpass = 0;
+	subpassDependency.srcAccessMask = 0;
+	subpassDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	subpassDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+
+	VkRenderPassCreateInfo renderPassCreateInfo = {};
+	renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassCreateInfo.attachmentCount = 1;
+	renderPassCreateInfo.pAttachments = &colorAttachment;
+	renderPassCreateInfo.subpassCount = 1;
+	renderPassCreateInfo.pSubpasses = &subpassDescription;
+	renderPassCreateInfo.dependencyCount = 1;
+	renderPassCreateInfo.pDependencies = &subpassDependency;
+
+	VK_ASSERT(vkCreateRenderPass(device, &renderPassCreateInfo, nullptr, &renderPass), "Failed to create Render Pass!")
+
+
 	// Create framebuffers
 
 	framebuffers.resize(swapchainImageCount);
@@ -562,6 +616,7 @@ bool VulkanCTX::Resize() // resizes swapchain
 	} 
 
 	SetupGraphics(surfaceCapabilities.currentExtent.width, surfaceCapabilities.currentExtent.height);
+	swapExtent = surfaceCapabilities.currentExtent;
 
 	return true;
 }
@@ -701,30 +756,6 @@ void VulkanCTX::ClearCurrentImage()
 
 void VulkanCTX::SetupGraphics(uint32_t width, uint32_t height)
 {
-	// Create Uniform Buffer Object
-	VkDeviceSize uboSize = sizeof(VulkanUBO);
-	createBuffer(device, physicalDev, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniformBuffer, &uniformBufferMemory, nullptr, 0);
-
-	// Create Descriptor Set Layout first
-	VkDescriptorSetLayoutBinding layoutBindings[2] = {{}, {}};
-
-	layoutBindings[0].binding = 0;
-	layoutBindings[0].descriptorCount = 1;
-	layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	layoutBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-	layoutBindings[1].binding = 1;
-	layoutBindings[1].descriptorCount = 1;
-	layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	layoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = 2;
-	layoutInfo.pBindings = layoutBindings;
-
-	VK_ASSERT(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorLayout), "Failed to create Descriptor Layout!")
-
 	// Feed shaders into pipeline
 
 	VkShaderModule vsShader = createShaderModule(device, vsSpv, sizeof(vsSpv));
@@ -799,13 +830,6 @@ void VulkanCTX::SetupGraphics(uint32_t width, uint32_t height)
 	colorBlendState.attachmentCount = 1;
 	colorBlendState.pAttachments = &colorBlendAttachment;
 
-	VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 1;
-	pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
-
-	VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout), "Failed to create Pipeline Layout")
-
 	VkGraphicsPipelineCreateInfo pipelineInfo = {};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipelineInfo.stageCount = 2;
@@ -823,63 +847,6 @@ void VulkanCTX::SetupGraphics(uint32_t width, uint32_t height)
 
 	vkDestroyShaderModule(device, vsShader, nullptr);
 	vkDestroyShaderModule(device, fsShader, nullptr);
-
-	// Setup descriptor pool and descriptor set
-	VkDescriptorPoolSize poolSizes[2]; // 1 descriptor per binding. 0 = ubo, 1 = sampler
-
-	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	poolSizes[0].descriptorCount = 1;
-
-	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[1].descriptorCount = 1;
-
-	VkDescriptorPoolCreateInfo poolInfo = {};
-	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.poolSizeCount = 2;
-	poolInfo.pPoolSizes = poolSizes;
-	poolInfo.maxSets = 1; // 1 set only
-
-	VK_ASSERT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool), "Failed to create Descriptor Pool!")
-
-	// create descriptor sets
-	VkDescriptorSetAllocateInfo setAllocInfo = {};
-	setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	setAllocInfo.descriptorPool = descriptorPool;
-	setAllocInfo.descriptorSetCount = 1;
-	setAllocInfo.pSetLayouts = &descriptorLayout;
-
-	VK_ASSERT(vkAllocateDescriptorSets(device, &setAllocInfo, &descriptorSet), "Failed to allocate Descriptor Set!")
-
-	// Update descriptor set
-	VkDescriptorBufferInfo bufferInfo = {};
-	bufferInfo.buffer = uniformBuffer;
-	bufferInfo.offset = 0;
-	bufferInfo.range = sizeof(VulkanUBO);
-
-	VkDescriptorImageInfo imageInfo = {};
-	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	imageInfo.imageView = textureImageView;
-	imageInfo.sampler = textureSampler;
-
-	VkWriteDescriptorSet descriptorWrites[2] = {{}, {}};
-
-	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[0].dstSet = descriptorSet;
-	descriptorWrites[0].dstBinding = 0;
-	descriptorWrites[0].dstArrayElement = 0;
-	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	descriptorWrites[0].descriptorCount = 1;
-	descriptorWrites[0].pBufferInfo = &bufferInfo;
-
-	descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[1].dstSet = descriptorSet;
-	descriptorWrites[1].dstBinding = 1;
-	descriptorWrites[1].dstArrayElement = 0;
-	descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	descriptorWrites[1].descriptorCount = 1;
-	descriptorWrites[1].pImageInfo = &imageInfo;
-
-	vkUpdateDescriptorSets(device, 2, descriptorWrites, 0, nullptr);
 }
 
 void VulkanCTX::DrawGraphics()
@@ -1009,6 +976,37 @@ void VulkanCTX::SetupTexture(uint8_t *data, uint32_t width, uint32_t height)
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
 	VK_ASSERT(vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler), "Failed to create Texture2D sampler!")
+
+	// Update descriptor set
+	VkDescriptorBufferInfo bufferInfo = {};
+	bufferInfo.buffer = uniformBuffer;
+	bufferInfo.offset = 0;
+	bufferInfo.range = sizeof(VulkanUBO);
+
+	VkDescriptorImageInfo imageInfo = {};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = textureImageView;
+	imageInfo.sampler = textureSampler;
+
+	VkWriteDescriptorSet descriptorWrites[2] = {{}, {}};
+
+	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[0].dstSet = descriptorSet;
+	descriptorWrites[0].dstBinding = 0;
+	descriptorWrites[0].dstArrayElement = 0;
+	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	descriptorWrites[0].descriptorCount = 1;
+	descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+	descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[1].dstSet = descriptorSet;
+	descriptorWrites[1].dstBinding = 1;
+	descriptorWrites[1].dstArrayElement = 0;
+	descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrites[1].descriptorCount = 1;
+	descriptorWrites[1].pImageInfo = &imageInfo;
+
+	vkUpdateDescriptorSets(device, 2, descriptorWrites, 0, nullptr);
 }
 
 void VulkanCTX::ReleaseTexture()
