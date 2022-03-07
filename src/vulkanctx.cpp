@@ -5,6 +5,7 @@
 #include "vert.h"
 #include "frag.h"
 #include <cstring>
+#include <algorithm>
 
 #ifndef _DEBUG
 //#define _DEBUG
@@ -464,13 +465,21 @@ bool VulkanCTX::Resize() // resizes swapchain
 	VkSurfaceCapabilitiesKHR surfaceCapabilities;
 	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDev, surface, &surfaceCapabilities);
 
+	VkExtent2D extent;
+	if (surfaceCapabilities.currentExtent.width != UINT32_MAX) {
+		extent = surfaceCapabilities.currentExtent;
+	} else {
+		extent.width = std::clamp(extent.width, surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width);
+		extent.height = std::clamp(extent.height, surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height);
+	}
+
 	VkSwapchainCreateInfoKHR swapchainCreateInfo = {};
 	swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
 	swapchainCreateInfo.surface = surface;
 	swapchainCreateInfo.minImageCount = surfaceCapabilities.minImageCount + 1;
 	swapchainCreateInfo.imageFormat = surfaceFormat.format;
 	swapchainCreateInfo.imageColorSpace = surfaceFormat.colorSpace;
-	swapchainCreateInfo.imageExtent = surfaceCapabilities.currentExtent;
+	swapchainCreateInfo.imageExtent = extent;
 	swapchainCreateInfo.imageArrayLayers = 1;
 	swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -608,15 +617,15 @@ bool VulkanCTX::Resize() // resizes swapchain
 		framebufferInfo.renderPass = renderPass;
 		framebufferInfo.attachmentCount = 1;
 		framebufferInfo.pAttachments = &swapchainImageViews[i];
-		framebufferInfo.width = surfaceCapabilities.currentExtent.width;
-		framebufferInfo.height = surfaceCapabilities.currentExtent.height;
+		framebufferInfo.width = extent.width;
+		framebufferInfo.height = extent.height;
 		framebufferInfo.layers = 1;
 
 		VK_ASSERT(vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffers[i]), "Failed to create framebuffers for swapchain")
 	} 
 
-	SetupGraphics(surfaceCapabilities.currentExtent.width, surfaceCapabilities.currentExtent.height);
-	swapExtent = surfaceCapabilities.currentExtent;
+	SetupGraphics(extent.width, extent.height);
+	swapExtent = extent;
 
 	return true;
 }
