@@ -300,6 +300,7 @@ bool VulkanCTX::Setup(int width, int height)
 	};
 
 	VkPhysicalDeviceFeatures physDevEnabledFeatures = {};
+	physDevEnabledFeatures.samplerAnisotropy = VK_TRUE;
 
 	VkDeviceCreateInfo devCreateInfo = {};
 	devCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -391,6 +392,7 @@ bool VulkanCTX::Setup(int width, int height)
 	// Create renderpass!
 
 	VkAttachmentDescription colorAttachment = {};
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 	colorAttachment.format = surfaceFormat.format;
 	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -473,7 +475,7 @@ bool VulkanCTX::Resize() // resizes swapchain
 		vkDeviceWaitIdle(device);
 
 		vkDestroySwapchainKHR(device, swapchainCreateInfo.oldSwapchain, nullptr);
-		vkFreeCommandBuffers(device, graphicsPool, 1, &presentCommandBuffer);
+		vkFreeCommandBuffers(device, graphicsPool, static_cast<uint32_t>(presentCommandBuffer.size()), presentCommandBuffer.data());
 
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 		vkDestroyPipeline(device, pipeline, nullptr);
@@ -516,6 +518,7 @@ bool VulkanCTX::Resize() // resizes swapchain
 	inFlightFences.resize(swapchainImageCount);
 	acquireSemaphores.resize(swapchainImageCount);
 	presentSemaphores.resize(swapchainImageCount);
+	presentCommandBuffer.resize(swapchainImageCount);
 
 	VkSemaphoreCreateInfo semaphoreCreateInfo = {};
 	semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -537,9 +540,9 @@ bool VulkanCTX::Resize() // resizes swapchain
 	commandbufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	commandbufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	commandbufferAllocateInfo.commandPool = graphicsPool;
-	commandbufferAllocateInfo.commandBufferCount = 1;
+	commandbufferAllocateInfo.commandBufferCount = static_cast<uint32_t>(presentCommandBuffer.size());
 
-	VK_ASSERT(vkAllocateCommandBuffers(device, &commandbufferAllocateInfo, &presentCommandBuffer), "Failed to allocate Command Buffers for Presentation")
+	VK_ASSERT(vkAllocateCommandBuffers(device, &commandbufferAllocateInfo, presentCommandBuffer.data()), "Failed to allocate Command Buffers for Presentation")
 
 	// Create framebuffers
 
@@ -560,9 +563,6 @@ bool VulkanCTX::Resize() // resizes swapchain
 
 	SetupGraphics(surfaceCapabilities.currentExtent.width, surfaceCapabilities.currentExtent.height);
 
-	this->ClearCurrentImage();
-	this->Present();
-
 	return true;
 }
 
@@ -570,7 +570,7 @@ void VulkanCTX::Release() // destroys vulkanctx
 {
 	vkDeviceWaitIdle(device);
 
-	vkFreeCommandBuffers(device, graphicsPool, 1, &presentCommandBuffer);
+	vkFreeCommandBuffers(device, graphicsPool, static_cast<uint32_t>(presentCommandBuffer.size()), presentCommandBuffer.data());
 
 	for (uint32_t i = 0; i < swapchainImageViews.size(); i++) {
 		vkDestroyFramebuffer(device, framebuffers[i], nullptr);
@@ -625,7 +625,44 @@ void VulkanCTX::ResetCache() // clears internal cache
 
 void VulkanCTX::Present() // presents to screen
 {
-	uint32_t imageIndex = 0;
+	VkPipelineStageFlags waitDst = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+	VkSubmitInfo submitInfo = {};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.waitSemaphoreCount = 1;
+	submitInfo.pWaitSemaphores = &acquireSemaphores[currentImage];
+	submitInfo.pWaitDstStageMask = &waitDst;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &presentCommandBuffer[currentImage];
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = &presentSemaphores[currentImage]; // when done, signal present semaphore.
+
+	VK_ASSERT(vkQueueSubmit(graphicsQueues[0], 1, &submitInfo, fences[currentImage]), "Failed to submit to presentation command buffer")
+
+	VkPresentInfoKHR presentInfo = {};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.waitSemaphoreCount = 1;
+	presentInfo.pWaitSemaphores = &presentSemaphores[currentImage];
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = &swapchain;
+	presentInfo.pImageIndices = (const uint32_t *)&imageIndex;
+
+	VkResult res = vkQueuePresentKHR(graphicsQueues[0], &presentInfo);
+	if ((res == VK_ERROR_OUT_OF_DATE_KHR) || (res == VK_SUBOPTIMAL_KHR)) {
+		vkDeviceWaitIdle(device);
+		this->Resize();
+		return;
+	} else if (res != VK_SUCCESS) {
+		std::cerr << "Failed to present queue!" << std::endl;
+		std::abort();
+	}	
+
+	currentImage = (currentImage + 1) % swapchainImages.size();
+}
+
+void VulkanCTX::Update() // updates swapchain
+{
+	vkWaitForFences(device, 1, &fences[currentImage], VK_TRUE, UINT64_MAX);
 	VkResult res = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquireSemaphores[currentImage], VK_NULL_HANDLE, &imageIndex);
 
 	if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {		
@@ -637,43 +674,7 @@ void VulkanCTX::Present() // presents to screen
 		std::abort();
 	}
 
-	VkPipelineStageFlags waitDst = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-	VkSubmitInfo submitInfo = {};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &acquireSemaphores[currentImage];
-	submitInfo.pWaitDstStageMask = &waitDst;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &presentCommandBuffer;
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &presentSemaphores[currentImage]; // when done, signal present semaphore.
-
 	vkResetFences(device, 1, &fences[currentImage]);
-
-	VK_ASSERT(vkQueueSubmit(graphicsQueues[0], 1, &submitInfo, fences[currentImage]), "Failed to submit to presentation command buffer")
-
-	vkWaitForFences(device, 1, &fences[currentImage], VK_TRUE, UINT64_MAX);
-
-	VkPresentInfoKHR presentInfo = {};
-	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &presentSemaphores[currentImage];
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = &swapchain;
-	presentInfo.pImageIndices = (const uint32_t *)&imageIndex;
-
-	res = vkQueuePresentKHR(graphicsQueues[0], &presentInfo);
-	if ((res == VK_ERROR_OUT_OF_DATE_KHR) || (res == VK_SUBOPTIMAL_KHR)) {
-		vkDeviceWaitIdle(device);
-		this->Resize();
-		return;
-	} else if (res != VK_SUCCESS) {
-		std::cerr << "Failed to present queue!" << std::endl;
-		std::abort();
-	}	
-
-	currentImage = (currentImage + 1) % swapchainImages.size();
 }
 
 void VulkanCTX::ClearCurrentImage()
@@ -888,7 +889,7 @@ void VulkanCTX::DrawGraphics()
 	VkRenderPassBeginInfo renderPassInfo = {};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = renderPass;
-	renderPassInfo.framebuffer = framebuffers[currentImage];
+	renderPassInfo.framebuffer = framebuffers[imageIndex];
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = swapExtent;
 	renderPassInfo.clearValueCount = 1;

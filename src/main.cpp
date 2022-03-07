@@ -41,6 +41,7 @@ int main(int argc, char **argv)
 		ubo.time += 0.002f;
 
 		ctx.UpdateUniform(ubo);
+		ctx.Update();
 		ctx.DrawGraphics();
 		ctx.Present();
 	}
