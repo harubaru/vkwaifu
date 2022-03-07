@@ -35,6 +35,7 @@ public:
 	void Release(); // destroys vulkanctx
 	void ResetCache(); // clears internal cache
 	void Present(); // presents to screen
+	void Update(); // update swapchain
 	void ClearCurrentImage();
 
 	void SetupGraphics(uint32_t width, uint32_t height); // Sets up Material
@@ -49,7 +50,7 @@ public:
 	inline void PollEvents() { glfwPollEvents(); }
 	inline GLFWwindow *getWindow() { return window; }
 
-	inline VkCommandBuffer getCurrentCommandBuffer() { return presentCommandBuffer; }
+	inline VkCommandBuffer getCurrentCommandBuffer() { return presentCommandBuffer[currentImage]; }
 	inline VkImage getCurrentImage() { return swapchainImages[currentImage]; }
 
 protected:
@@ -92,8 +93,8 @@ protected:
 	VkSwapchainKHR swapchain;
 	std::vector<VkImage> swapchainImages;
 	std::vector<VkImageView> swapchainImageViews;
-	VkCommandBuffer presentCommandBuffer;
-	uint32_t currentImage;
+	std::vector<VkCommandBuffer> presentCommandBuffer;
+	uint32_t currentImage, imageIndex;
 
 	VkSurfaceFormatKHR surfaceFormat;
 	VkPresentModeKHR presentMode;

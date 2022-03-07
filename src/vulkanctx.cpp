@@ -5,6 +5,7 @@
 #include "vert.h"
 #include "frag.h"
 #include <cstring>
+#include <algorithm>
 
 #ifndef _DEBUG
 //#define _DEBUG
@@ -300,6 +301,7 @@ bool VulkanCTX::Setup(int width, int height)
 	};
 
 	VkPhysicalDeviceFeatures physDevEnabledFeatures = {};
+	physDevEnabledFeatures.samplerAnisotropy = VK_TRUE;
 
 	VkDeviceCreateInfo devCreateInfo = {};
 	devCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -344,6 +346,7 @@ bool VulkanCTX::Setup(int width, int height)
 	// Now, lets setup the swapchain!
 
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+	glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
 	window = glfwCreateWindow(width, height, "vkwaifu: waifuing edition!", nullptr, nullptr);
@@ -352,6 +355,77 @@ bool VulkanCTX::Setup(int width, int height)
 	VkBool32 supported;
 	VK_ASSERT(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDev, queueCreateInfos[0].queueFamilyIndex, surface, &supported), "surface got lost on its way to vkwaifu")
 	VK_FATAL(supported != VK_TRUE, "Device does not support presentation")
+
+	// Create Uniform Buffer Object
+	VkDeviceSize uboSize = sizeof(VulkanUBO);
+	createBuffer(device, physicalDev, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniformBuffer, &uniformBufferMemory, nullptr, 0);
+
+	// Create Descriptor Set Layout first
+	VkDescriptorSetLayoutBinding layoutBindings[2] = {{}, {}};
+
+	layoutBindings[0].binding = 0;
+	layoutBindings[0].descriptorCount = 1;
+	layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	layoutBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	layoutBindings[1].binding = 1;
+	layoutBindings[1].descriptorCount = 1;
+	layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	layoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.bindingCount = 2;
+	layoutInfo.pBindings = layoutBindings;
+
+	VK_ASSERT(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorLayout), "Failed to create Descriptor Layout!")
+
+	// Create Pipeline Layout
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1;
+	pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
+
+	VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout), "Failed to create Pipeline Layout")
+
+	// Setup descriptor pool and descriptor set
+	VkDescriptorPoolSize poolSizes[2]; // 1 descriptor per binding. 0 = ubo, 1 = sampler
+
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	poolSizes[0].descriptorCount = 1;
+
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[1].descriptorCount = 1;
+
+	VkDescriptorPoolCreateInfo poolInfo = {};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.poolSizeCount = 2;
+	poolInfo.pPoolSizes = poolSizes;
+	poolInfo.maxSets = 1; // 1 set only
+
+	VK_ASSERT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool), "Failed to create Descriptor Pool!")
+
+	// create descriptor sets
+	VkDescriptorSetAllocateInfo setAllocInfo = {};
+	setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	setAllocInfo.descriptorPool = descriptorPool;
+	setAllocInfo.descriptorSetCount = 1;
+	setAllocInfo.pSetLayouts = &descriptorLayout;
+
+	VK_ASSERT(vkAllocateDescriptorSets(device, &setAllocInfo, &descriptorSet), "Failed to allocate Descriptor Set!")
+
+	return true;
+}
+
+bool VulkanCTX::Resize() // resizes swapchain
+{
+	int width, height;
+	glfwGetFramebufferSize(window, &width, &height);
+
+	while (!width || !height) {
+		glfwGetFramebufferSize(window, &width, &height);
+		glfwWaitEvents();
+	}
 
 	// Get format and present mode beforehand
 	uint32_t formatCount = 0;
@@ -369,7 +443,8 @@ bool VulkanCTX::Setup(int width, int height)
 		}
 	}
 
-	VK_FATAL(surfaceFormat.format == VK_FORMAT_UNDEFINED, "cannot find supported format")
+	if (surfaceFormat.format == VK_FORMAT_UNDEFINED)
+		surfaceFormat = surfaceFormats[0];
 
 	uint32_t presentModeCount = 0;
 	std::vector<VkPresentModeKHR> presentModes;
@@ -386,7 +461,114 @@ bool VulkanCTX::Setup(int width, int height)
 		}
 	}
 
-	VK_FATAL(presentMode == 0xFF, "cannot find supported surface present mode")
+	if (presentMode == 0xFF)
+		presentMode = VK_PRESENT_MODE_FIFO_KHR;
+
+	// Create swapchain
+	VkSurfaceCapabilitiesKHR surfaceCapabilities;
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDev, surface, &surfaceCapabilities);
+
+	VkExtent2D extent;
+	if (surfaceCapabilities.currentExtent.width != UINT32_MAX) {
+		extent = surfaceCapabilities.currentExtent;
+	} else {
+		extent.width = std::clamp(extent.width, surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width);
+		extent.height = std::clamp(extent.height, surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height);
+	}
+
+	VkSwapchainCreateInfoKHR swapchainCreateInfo = {};
+	swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+	swapchainCreateInfo.surface = surface;
+	swapchainCreateInfo.minImageCount = surfaceCapabilities.minImageCount + 1;
+	swapchainCreateInfo.imageFormat = surfaceFormat.format;
+	swapchainCreateInfo.imageColorSpace = surfaceFormat.colorSpace;
+	swapchainCreateInfo.imageExtent = extent;
+	swapchainCreateInfo.imageArrayLayers = 1;
+	swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	swapchainCreateInfo.presentMode = presentMode;
+	swapchainCreateInfo.clipped = VK_TRUE;
+	swapchainCreateInfo.oldSwapchain = swapchain;
+
+	VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCreateInfo, nullptr, &swapchain), "failed to create swapchain")
+
+	// Get swapchain images and create image views.
+	uint32_t swapchainImageCount;
+	vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr);
+	swapchainImages.resize(swapchainImageCount);
+	swapchainImageViews.resize(swapchainImageCount);
+	vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data());
+
+	// Destroy old objects such as materials
+	if (swapchainCreateInfo.oldSwapchain != VK_NULL_HANDLE) {
+		vkDestroySwapchainKHR(device, swapchainCreateInfo.oldSwapchain, nullptr);
+		vkFreeCommandBuffers(device, graphicsPool, static_cast<uint32_t>(presentCommandBuffer.size()), presentCommandBuffer.data());
+
+		vkDestroyRenderPass(device, renderPass, nullptr);
+		vkDestroyPipeline(device, pipeline, nullptr);
+
+		// Don't free textures or uniforms
+
+		for (uint32_t i = 0; i < swapchainImageCount; i++) {
+			vkDestroyFramebuffer(device, framebuffers[i], nullptr);
+			vkDestroyImageView(device, swapchainImageViews[i], nullptr);
+			vkDestroySemaphore(device, acquireSemaphores[i], nullptr);
+			vkDestroySemaphore(device, presentSemaphores[i], nullptr);
+			vkDestroyFence(device, fences[i], nullptr);
+			inFlightFences[i] = VK_NULL_HANDLE;
+		}
+	}
+
+
+	for (uint32_t i = 0; i < swapchainImageCount; i++) {
+		VkImageViewCreateInfo swapchainViewCreateInfo = {};
+		swapchainViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		swapchainViewCreateInfo.image = swapchainImages[i];
+		swapchainViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		swapchainViewCreateInfo.format = surfaceFormat.format;
+		swapchainViewCreateInfo.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+		swapchainViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		swapchainViewCreateInfo.subresourceRange.baseMipLevel = 0;
+		swapchainViewCreateInfo.subresourceRange.levelCount = 1;
+		swapchainViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+		swapchainViewCreateInfo.subresourceRange.layerCount = 1;
+
+		VK_ASSERT(vkCreateImageView(device, &swapchainViewCreateInfo, nullptr, &swapchainImageViews[i]), "Failed to create Swapchain Image View!")
+	}
+
+	// Create one set of semaphores and fences per image.
+
+	fences.resize(swapchainImageCount);
+	inFlightFences.resize(swapchainImageCount);
+	acquireSemaphores.resize(swapchainImageCount);
+	presentSemaphores.resize(swapchainImageCount);
+	presentCommandBuffer.resize(swapchainImageCount);
+
+	VkSemaphoreCreateInfo semaphoreCreateInfo = {};
+	semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	
+	VkFenceCreateInfo fenceCreateInfo = {};
+	fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+	for (uint32_t i = 0; i < swapchainImageCount; i++) {
+		VK_ASSERT(
+			vkCreateSemaphore(device, &semaphoreCreateInfo, nullptr, &acquireSemaphores[i]) ||
+			vkCreateSemaphore(device, &semaphoreCreateInfo, nullptr, &presentSemaphores[i]) ||
+			vkCreateFence(device, &fenceCreateInfo, nullptr, &fences[i]),
+			"Failed to create synchronization objects!"
+		);
+	}
+
+	VkCommandBufferAllocateInfo commandbufferAllocateInfo = {};
+	commandbufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	commandbufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commandbufferAllocateInfo.commandPool = graphicsPool;
+	commandbufferAllocateInfo.commandBufferCount = static_cast<uint32_t>(presentCommandBuffer.size());
+
+	VK_ASSERT(vkAllocateCommandBuffers(device, &commandbufferAllocateInfo, presentCommandBuffer.data()), "Failed to allocate Command Buffers for Presentation")
 
 	// Create renderpass!
 
@@ -427,119 +609,6 @@ bool VulkanCTX::Setup(int width, int height)
 
 	VK_ASSERT(vkCreateRenderPass(device, &renderPassCreateInfo, nullptr, &renderPass), "Failed to create Render Pass!")
 
-	return true;
-}
-
-bool VulkanCTX::Resize() // resizes swapchain
-{
-	int width, height;
-	glfwGetFramebufferSize(window, &width, &height);
-
-	while (!width || !height) {
-		glfwGetFramebufferSize(window, &width, &height);
-		glfwWaitEvents();
-	}
-
-	VkSurfaceCapabilitiesKHR surfaceCapabilities;
-	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDev, surface, &surfaceCapabilities);
-
-	VkSwapchainCreateInfoKHR swapchainCreateInfo = {};
-	swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-	swapchainCreateInfo.surface = surface;
-	swapchainCreateInfo.minImageCount = surfaceCapabilities.minImageCount + 1;
-	swapchainCreateInfo.imageFormat = surfaceFormat.format;
-	swapchainCreateInfo.imageColorSpace = surfaceFormat.colorSpace;
-	swapchainCreateInfo.imageExtent = surfaceCapabilities.currentExtent;
-	swapchainCreateInfo.imageArrayLayers = 1;
-	swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-	swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	swapchainCreateInfo.presentMode = presentMode;
-	swapchainCreateInfo.clipped = VK_TRUE;
-	swapchainCreateInfo.oldSwapchain = swapchain;
-
-	VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCreateInfo, nullptr, &swapchain), "failed to create swapchain")
-
-	// Get swapchain images and create image views.
-	uint32_t swapchainImageCount;
-	vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr);
-	swapchainImages.resize(swapchainImageCount);
-	swapchainImageViews.resize(swapchainImageCount);
-	vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data());
-
-	// Destroy old objects such as materials
-	if (swapchainCreateInfo.oldSwapchain != VK_NULL_HANDLE) {
-		vkDeviceWaitIdle(device);
-
-		vkDestroySwapchainKHR(device, swapchainCreateInfo.oldSwapchain, nullptr);
-		vkFreeCommandBuffers(device, graphicsPool, 1, &presentCommandBuffer);
-
-		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-		vkDestroyPipeline(device, pipeline, nullptr);
-
-		// Don't free textures or uniforms
-
-		vkDestroyDescriptorSetLayout(device, descriptorLayout, nullptr);
-		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-
-		for (uint32_t i = 0; i < swapchainImageCount; i++) {
-			vkDestroyFramebuffer(device, framebuffers[i], nullptr);
-			vkDestroyImageView(device, swapchainImageViews[i], nullptr);
-			vkDestroySemaphore(device, acquireSemaphores[i], nullptr);
-			vkDestroySemaphore(device, presentSemaphores[i], nullptr);
-			vkDestroyFence(device, fences[i], nullptr);
-			inFlightFences[i] = VK_NULL_HANDLE;
-		}
-	}
-
-
-	for (uint32_t i = 0; i < swapchainImageCount; i++) {
-		VkImageViewCreateInfo swapchainViewCreateInfo = {};
-		swapchainViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		swapchainViewCreateInfo.image = swapchainImages[i];
-		swapchainViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		swapchainViewCreateInfo.format = surfaceFormat.format;
-		swapchainViewCreateInfo.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
-		swapchainViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		swapchainViewCreateInfo.subresourceRange.baseMipLevel = 0;
-		swapchainViewCreateInfo.subresourceRange.levelCount = 1;
-		swapchainViewCreateInfo.subresourceRange.baseArrayLayer = 0;
-		swapchainViewCreateInfo.subresourceRange.layerCount = 1;
-
-		VK_ASSERT(vkCreateImageView(device, &swapchainViewCreateInfo, nullptr, &swapchainImageViews[i]), "Failed to create Swapchain Image View!")
-	}
-
-	// Create one set of semaphores and fences per image.
-
-	fences.resize(swapchainImageCount);
-	inFlightFences.resize(swapchainImageCount);
-	acquireSemaphores.resize(swapchainImageCount);
-	presentSemaphores.resize(swapchainImageCount);
-
-	VkSemaphoreCreateInfo semaphoreCreateInfo = {};
-	semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-	
-	VkFenceCreateInfo fenceCreateInfo = {};
-	fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-	for (uint32_t i = 0; i < swapchainImageCount; i++) {
-		VK_ASSERT(
-			vkCreateSemaphore(device, &semaphoreCreateInfo, nullptr, &acquireSemaphores[i]) ||
-			vkCreateSemaphore(device, &semaphoreCreateInfo, nullptr, &presentSemaphores[i]) ||
-			vkCreateFence(device, &fenceCreateInfo, nullptr, &fences[i]),
-			"Failed to create synchronization objects!"
-		);
-	}
-
-	VkCommandBufferAllocateInfo commandbufferAllocateInfo = {};
-	commandbufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	commandbufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	commandbufferAllocateInfo.commandPool = graphicsPool;
-	commandbufferAllocateInfo.commandBufferCount = 1;
-
-	VK_ASSERT(vkAllocateCommandBuffers(device, &commandbufferAllocateInfo, &presentCommandBuffer), "Failed to allocate Command Buffers for Presentation")
 
 	// Create framebuffers
 
@@ -551,17 +620,15 @@ bool VulkanCTX::Resize() // resizes swapchain
 		framebufferInfo.renderPass = renderPass;
 		framebufferInfo.attachmentCount = 1;
 		framebufferInfo.pAttachments = &swapchainImageViews[i];
-		framebufferInfo.width = surfaceCapabilities.currentExtent.width;
-		framebufferInfo.height = surfaceCapabilities.currentExtent.height;
+		framebufferInfo.width = extent.width;
+		framebufferInfo.height = extent.height;
 		framebufferInfo.layers = 1;
 
 		VK_ASSERT(vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffers[i]), "Failed to create framebuffers for swapchain")
 	} 
 
-	SetupGraphics(surfaceCapabilities.currentExtent.width, surfaceCapabilities.currentExtent.height);
-
-	this->ClearCurrentImage();
-	this->Present();
+	SetupGraphics(extent.width, extent.height);
+	swapExtent = extent;
 
 	return true;
 }
@@ -570,7 +637,7 @@ void VulkanCTX::Release() // destroys vulkanctx
 {
 	vkDeviceWaitIdle(device);
 
-	vkFreeCommandBuffers(device, graphicsPool, 1, &presentCommandBuffer);
+	vkFreeCommandBuffers(device, graphicsPool, static_cast<uint32_t>(presentCommandBuffer.size()), presentCommandBuffer.data());
 
 	for (uint32_t i = 0; i < swapchainImageViews.size(); i++) {
 		vkDestroyFramebuffer(device, framebuffers[i], nullptr);
@@ -625,7 +692,44 @@ void VulkanCTX::ResetCache() // clears internal cache
 
 void VulkanCTX::Present() // presents to screen
 {
-	uint32_t imageIndex = 0;
+	VkPipelineStageFlags waitDst = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+	VkSubmitInfo submitInfo = {};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.waitSemaphoreCount = 1;
+	submitInfo.pWaitSemaphores = &acquireSemaphores[currentImage];
+	submitInfo.pWaitDstStageMask = &waitDst;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &presentCommandBuffer[currentImage];
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = &presentSemaphores[currentImage]; // when done, signal present semaphore.
+
+	VK_ASSERT(vkQueueSubmit(graphicsQueues[0], 1, &submitInfo, fences[currentImage]), "Failed to submit to presentation command buffer")
+
+	VkPresentInfoKHR presentInfo = {};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.waitSemaphoreCount = 1;
+	presentInfo.pWaitSemaphores = &presentSemaphores[currentImage];
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = &swapchain;
+	presentInfo.pImageIndices = (const uint32_t *)&imageIndex;
+
+	VkResult res = vkQueuePresentKHR(graphicsQueues[0], &presentInfo);
+	if ((res == VK_ERROR_OUT_OF_DATE_KHR) || (res == VK_SUBOPTIMAL_KHR)) {
+		vkDeviceWaitIdle(device);
+		this->Resize();
+		return;
+	} else if (res != VK_SUCCESS) {
+		std::cerr << "Failed to present queue!" << std::endl;
+		std::abort();
+	}	
+
+	currentImage = (currentImage + 1) % swapchainImages.size();
+}
+
+void VulkanCTX::Update() // updates swapchain
+{
+	vkWaitForFences(device, 1, &fences[currentImage], VK_TRUE, UINT64_MAX);
 	VkResult res = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquireSemaphores[currentImage], VK_NULL_HANDLE, &imageIndex);
 
 	if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {		
@@ -637,43 +741,7 @@ void VulkanCTX::Present() // presents to screen
 		std::abort();
 	}
 
-	VkPipelineStageFlags waitDst = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-	VkSubmitInfo submitInfo = {};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &acquireSemaphores[currentImage];
-	submitInfo.pWaitDstStageMask = &waitDst;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &presentCommandBuffer;
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &presentSemaphores[currentImage]; // when done, signal present semaphore.
-
 	vkResetFences(device, 1, &fences[currentImage]);
-
-	VK_ASSERT(vkQueueSubmit(graphicsQueues[0], 1, &submitInfo, fences[currentImage]), "Failed to submit to presentation command buffer")
-
-	vkWaitForFences(device, 1, &fences[currentImage], VK_TRUE, UINT64_MAX);
-
-	VkPresentInfoKHR presentInfo = {};
-	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &presentSemaphores[currentImage];
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = &swapchain;
-	presentInfo.pImageIndices = (const uint32_t *)&imageIndex;
-
-	res = vkQueuePresentKHR(graphicsQueues[0], &presentInfo);
-	if ((res == VK_ERROR_OUT_OF_DATE_KHR) || (res == VK_SUBOPTIMAL_KHR)) {
-		vkDeviceWaitIdle(device);
-		this->Resize();
-		return;
-	} else if (res != VK_SUCCESS) {
-		std::cerr << "Failed to present queue!" << std::endl;
-		std::abort();
-	}	
-
-	currentImage = (currentImage + 1) % swapchainImages.size();
 }
 
 void VulkanCTX::ClearCurrentImage()
@@ -700,30 +768,6 @@ void VulkanCTX::ClearCurrentImage()
 
 void VulkanCTX::SetupGraphics(uint32_t width, uint32_t height)
 {
-	// Create Uniform Buffer Object
-	VkDeviceSize uboSize = sizeof(VulkanUBO);
-	createBuffer(device, physicalDev, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniformBuffer, &uniformBufferMemory, nullptr, 0);
-
-	// Create Descriptor Set Layout first
-	VkDescriptorSetLayoutBinding layoutBindings[2] = {{}, {}};
-
-	layoutBindings[0].binding = 0;
-	layoutBindings[0].descriptorCount = 1;
-	layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	layoutBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-	layoutBindings[1].binding = 1;
-	layoutBindings[1].descriptorCount = 1;
-	layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	layoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = 2;
-	layoutInfo.pBindings = layoutBindings;
-
-	VK_ASSERT(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorLayout), "Failed to create Descriptor Layout!")
-
 	// Feed shaders into pipeline
 
 	VkShaderModule vsShader = createShaderModule(device, vsSpv, sizeof(vsSpv));
@@ -798,13 +842,6 @@ void VulkanCTX::SetupGraphics(uint32_t width, uint32_t height)
 	colorBlendState.attachmentCount = 1;
 	colorBlendState.pAttachments = &colorBlendAttachment;
 
-	VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 1;
-	pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
-
-	VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout), "Failed to create Pipeline Layout")
-
 	VkGraphicsPipelineCreateInfo pipelineInfo = {};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipelineInfo.stageCount = 2;
@@ -822,63 +859,6 @@ void VulkanCTX::SetupGraphics(uint32_t width, uint32_t height)
 
 	vkDestroyShaderModule(device, vsShader, nullptr);
 	vkDestroyShaderModule(device, fsShader, nullptr);
-
-	// Setup descriptor pool and descriptor set
-	VkDescriptorPoolSize poolSizes[2]; // 1 descriptor per binding. 0 = ubo, 1 = sampler
-
-	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	poolSizes[0].descriptorCount = 1;
-
-	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[1].descriptorCount = 1;
-
-	VkDescriptorPoolCreateInfo poolInfo = {};
-	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.poolSizeCount = 2;
-	poolInfo.pPoolSizes = poolSizes;
-	poolInfo.maxSets = 1; // 1 set only
-
-	VK_ASSERT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool), "Failed to create Descriptor Pool!")
-
-	// create descriptor sets
-	VkDescriptorSetAllocateInfo setAllocInfo = {};
-	setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	setAllocInfo.descriptorPool = descriptorPool;
-	setAllocInfo.descriptorSetCount = 1;
-	setAllocInfo.pSetLayouts = &descriptorLayout;
-
-	VK_ASSERT(vkAllocateDescriptorSets(device, &setAllocInfo, &descriptorSet), "Failed to allocate Descriptor Set!")
-
-	// Update descriptor set
-	VkDescriptorBufferInfo bufferInfo = {};
-	bufferInfo.buffer = uniformBuffer;
-	bufferInfo.offset = 0;
-	bufferInfo.range = sizeof(VulkanUBO);
-
-	VkDescriptorImageInfo imageInfo = {};
-	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	imageInfo.imageView = textureImageView;
-	imageInfo.sampler = textureSampler;
-
-	VkWriteDescriptorSet descriptorWrites[2] = {{}, {}};
-
-	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[0].dstSet = descriptorSet;
-	descriptorWrites[0].dstBinding = 0;
-	descriptorWrites[0].dstArrayElement = 0;
-	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	descriptorWrites[0].descriptorCount = 1;
-	descriptorWrites[0].pBufferInfo = &bufferInfo;
-
-	descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[1].dstSet = descriptorSet;
-	descriptorWrites[1].dstBinding = 1;
-	descriptorWrites[1].dstArrayElement = 0;
-	descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	descriptorWrites[1].descriptorCount = 1;
-	descriptorWrites[1].pImageInfo = &imageInfo;
-
-	vkUpdateDescriptorSets(device, 2, descriptorWrites, 0, nullptr);
 }
 
 void VulkanCTX::DrawGraphics()
@@ -888,7 +868,7 @@ void VulkanCTX::DrawGraphics()
 	VkRenderPassBeginInfo renderPassInfo = {};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = renderPass;
-	renderPassInfo.framebuffer = framebuffers[currentImage];
+	renderPassInfo.framebuffer = framebuffers[imageIndex];
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = swapExtent;
 	renderPassInfo.clearValueCount = 1;
@@ -1008,6 +988,37 @@ void VulkanCTX::SetupTexture(uint8_t *data, uint32_t width, uint32_t height)
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
 	VK_ASSERT(vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler), "Failed to create Texture2D sampler!")
+
+	// Update descriptor set
+	VkDescriptorBufferInfo bufferInfo = {};
+	bufferInfo.buffer = uniformBuffer;
+	bufferInfo.offset = 0;
+	bufferInfo.range = sizeof(VulkanUBO);
+
+	VkDescriptorImageInfo imageInfo = {};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = textureImageView;
+	imageInfo.sampler = textureSampler;
+
+	VkWriteDescriptorSet descriptorWrites[2] = {{}, {}};
+
+	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[0].dstSet = descriptorSet;
+	descriptorWrites[0].dstBinding = 0;
+	descriptorWrites[0].dstArrayElement = 0;
+	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	descriptorWrites[0].descriptorCount = 1;
+	descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+	descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[1].dstSet = descriptorSet;
+	descriptorWrites[1].dstBinding = 1;
+	descriptorWrites[1].dstArrayElement = 0;
+	descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrites[1].descriptorCount = 1;
+	descriptorWrites[1].pImageInfo = &imageInfo;
+
+	vkUpdateDescriptorSets(device, 2, descriptorWrites, 0, nullptr);
 }
 
 void VulkanCTX::ReleaseTexture()
