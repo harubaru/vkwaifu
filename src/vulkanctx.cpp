@@ -346,6 +346,7 @@ bool VulkanCTX::Setup(int width, int height)
 	// Now, lets setup the swapchain!
 
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+	glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
 	window = glfwCreateWindow(width, height, "vkwaifu: waifuing edition!", nullptr, nullptr);
@@ -442,7 +443,8 @@ bool VulkanCTX::Resize() // resizes swapchain
 		}
 	}
 
-	VK_FATAL(surfaceFormat.format == VK_FORMAT_UNDEFINED, "cannot find supported format")
+	if (surfaceFormat.format == VK_FORMAT_UNDEFINED)
+		surfaceFormat = surfaceFormats[0];
 
 	uint32_t presentModeCount = 0;
 	std::vector<VkPresentModeKHR> presentModes;
@@ -459,7 +461,8 @@ bool VulkanCTX::Resize() // resizes swapchain
 		}
 	}
 
-	VK_FATAL(presentMode == 0xFF, "cannot find supported surface present mode")
+	if (presentMode == 0xFF)
+		presentMode = VK_PRESENT_MODE_FIFO_KHR;
 
 	// Create swapchain
 	VkSurfaceCapabilitiesKHR surfaceCapabilities;
